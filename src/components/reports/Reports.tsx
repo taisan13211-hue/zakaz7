@@ -1,26 +1,21 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { FileText, Upload, Download, Eye, Trash2, X, Plus, Search, Filter } from 'lucide-react';
 import { Button } from '../ui/Button';
 import { Card, CardHeader, CardTitle, CardContent } from '../ui/Card';
 import { useAuth } from '../../contexts/AuthContext';
-
-interface Report {
-  id: string;
-  title: string;
-  description: string;
-  fileName: string;
-  fileType: string;
-  fileSize: number;
-  uploadedBy: string;
-  uploadedByName: string;
-  uploadedAt: Date;
-  fileUrl?: string;
-}
+import {
+  Report as ReportType,
+  fetchReports,
+  createReport,
+  deleteReport as deleteReportService,
+  uploadReportFile,
+  downloadReport as downloadReportService
+} from '../../services/reportsService';
 
 interface UploadReportModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onUpload: (report: Omit<Report, 'id' | 'uploadedAt'>) => void;
+  onUpload: (file: File, title: string, description: string) => Promise<void>;
 }
 
 function UploadReportModal({ isOpen, onClose, onUpload }: UploadReportModalProps) {
@@ -72,24 +67,18 @@ function UploadReportModal({ isOpen, onClose, onUpload }: UploadReportModalProps
     }
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!formData.file || !formData.title.trim() || !user) return;
 
-    const report: Omit<Report, 'id' | 'uploadedAt'> = {
-      title: formData.title,
-      description: formData.description,
-      fileName: formData.file.name,
-      fileType: formData.file.type,
-      fileSize: formData.file.size,
-      uploadedBy: user.id,
-      uploadedByName: user.name,
-      fileUrl: URL.createObjectURL(formData.file)
-    };
-
-    onUpload(report);
-    setFormData({ title: '', description: '', file: null });
-    onClose();
+    try {
+      await onUpload(formData.file, formData.title, formData.description);
+      setFormData({ title: '', description: '', file: null });
+      onClose();
+    } catch (error) {
+      console.error('Error uploading report:', error);
+      alert('Ошибка при загрузке отчета');
+    }
   };
 
   const formatFileSize = (bytes: number) => {
@@ -215,150 +204,96 @@ function UploadReportModal({ isOpen, onClose, onUpload }: UploadReportModalProps
 
 export function Reports() {
   const { user } = useAuth();
-  const [reports, setReports] = useState<Report[]>([]);
-  
+  const [reports, setReports] = useState<ReportType[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [showUploadModal, setShowUploadModal] = useState(false);
+  const [loading, setLoading] = useState(true);
 
-  // Загружаем отчеты из localStorage при инициализации
-  React.useEffect(() => {
-    const savedReports = localStorage.getItem('reports');
-    if (savedReports) {
-      try {
-        const parsedReports = JSON.parse(savedReports);
-        const reportsWithDates = parsedReports.map((report: any) => ({
-          ...report,
-          uploadedAt: new Date(report.uploadedAt)
-        }));
-        setReports(reportsWithDates);
-      } catch (error) {
-        console.error('Ошибка при загрузке отчетов:', error);
-        // Устанавливаем тестовые данные если localStorage пуст
-        const defaultReports = [
-          {
-            id: '1',
-            title: 'Отчет по проекту "Свадебный альбом" за февраль',
-            description: 'Подробный отчет о выполненной работе по свадебному альбому',
-            fileName: 'wedding_report_feb.docx',
-            fileType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-            fileSize: 245760,
-            uploadedBy: '2',
-            uploadedByName: 'Анна Иванова',
-            uploadedAt: new Date('2024-02-28'),
-            fileUrl: '#'
-          },
-          {
-            id: '2',
-            title: 'Отчет по выпускному альбому',
-            description: 'Промежуточный отчет о работе над выпускным альбомом',
-            fileName: 'graduation_report.txt',
-            fileType: 'text/plain',
-            fileSize: 12800,
-            uploadedBy: '3',
-            uploadedByName: 'Елена Сидорова',
-            uploadedAt: new Date('2024-02-25'),
-            fileUrl: '#'
-          }
-        ];
-        setReports(defaultReports);
-        localStorage.setItem('reports', JSON.stringify(defaultReports));
-      }
-    } else {
-      // Устанавливаем тестовые данные если localStorage пуст
-      const defaultReports = [
-        {
-          id: '1',
-          title: 'Отчет по проекту "Свадебный альбом" за февраль',
-          description: 'Подробный отчет о выполненной работе по свадебному альбому',
-          fileName: 'wedding_report_feb.docx',
-          fileType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-          fileSize: 245760,
-          uploadedBy: '2',
-          uploadedByName: 'Анна Иванова',
-          uploadedAt: new Date('2024-02-28'),
-          fileUrl: '#'
-        },
-        {
-          id: '2',
-          title: 'Отчет по выпускному альбому',
-          description: 'Промежуточный отчет о работе над выпускным альбомом',
-          fileName: 'graduation_report.txt',
-          fileType: 'text/plain',
-          fileSize: 12800,
-          uploadedBy: '3',
-          uploadedByName: 'Елена Сидорова',
-          uploadedAt: new Date('2024-02-25'),
-          fileUrl: '#'
-        }
-      ];
-      setReports(defaultReports);
-      localStorage.setItem('reports', JSON.stringify(defaultReports));
-    }
+  useEffect(() => {
+    loadReports();
   }, []);
 
-  // Сохраняем отчеты в localStorage при изменении
-  React.useEffect(() => {
-    if (reports.length > 0) {
-      localStorage.setItem('reports', JSON.stringify(reports));
+  const loadReports = async () => {
+    try {
+      setLoading(true);
+      const data = await fetchReports();
+      setReports(data);
+    } catch (error) {
+      console.error('Error loading reports:', error);
+    } finally {
+      setLoading(false);
     }
-  }, [reports]);
-
-  const handleUploadReport = (report: Omit<Report, 'id' | 'uploadedAt'>) => {
-    const newReport: Report = {
-      ...report,
-      id: Math.random().toString(36).substr(2, 9),
-      uploadedAt: new Date()
-    };
-    setReports(prev => {
-      const updatedReports = [newReport, ...prev];
-      localStorage.setItem('reports', JSON.stringify(updatedReports));
-      return updatedReports;
-    });
   };
 
-  const handleDeleteReport = (reportId: string) => {
-    const report = reports.find(r => r.id === reportId);
-    if (report && (user?.role === 'admin' || user?.id === report.uploadedBy)) {
-      setReports(prev => {
-        const updatedReports = prev.filter(r => r.id !== reportId);
-        localStorage.setItem('reports', JSON.stringify(updatedReports));
-        return updatedReports;
+  const handleUploadReport = async (file: File, title: string, description: string) => {
+    if (!user) return;
+
+    try {
+      const fileUrl = await uploadReportFile(file, user.id);
+      const storagePath = `${user.id}/${file.name}`;
+
+      await createReport({
+        title,
+        description,
+        fileName: file.name,
+        fileType: file.type,
+        fileSize: file.size,
+        fileUrl,
+        storagePath,
+        uploadedBy: user.id
       });
-      if (report.fileUrl && report.fileUrl.startsWith('blob:')) {
-        URL.revokeObjectURL(report.fileUrl);
-      }
+
+      await loadReports();
+    } catch (error) {
+      console.error('Error uploading report:', error);
+      throw error;
     }
   };
 
-  const handleDownloadReport = (report: Report) => {
-    if (report.fileUrl) {
-      const link = document.createElement('a');
-      link.href = report.fileUrl;
-      link.download = report.fileName;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
+  const handleDeleteReport = async (reportId: string) => {
+    if (!user) return;
+
+    const report = reports.find(r => r.id === reportId);
+    if (!report) return;
+
+    const canDelete = user.role === 'admin' || user.id === report.uploaded_by;
+    if (!canDelete) return;
+
+    if (!confirm('Вы уверены, что хотите удалить этот отчет?')) return;
+
+    try {
+      await deleteReportService(reportId);
+      await loadReports();
+    } catch (error) {
+      console.error('Error deleting report:', error);
+      alert('Ошибка при удалении отчета');
     }
   };
 
-  const canViewReport = (report: Report): boolean => {
-    // Админы видят все отчеты
-    if (user?.role === 'admin') return true;
-    // Остальные видят только свои отчеты
-    return user?.id === report.uploadedBy;
+  const handleDownloadReport = async (report: ReportType) => {
+    try {
+      await downloadReportService(report);
+    } catch (error) {
+      console.error('Error downloading report:', error);
+      alert('Ошибка при скачивании отчета');
+    }
   };
 
-  const canDeleteReport = (report: Report): boolean => {
-    // Админы могут удалять любые отчеты
+  const canViewReport = (report: ReportType): boolean => {
     if (user?.role === 'admin') return true;
-    // Пользователи могут удалять только свои отчеты
-    return user?.id === report.uploadedBy;
+    return user?.id === report.uploaded_by;
+  };
+
+  const canDeleteReport = (report: ReportType): boolean => {
+    if (user?.role === 'admin') return true;
+    return user?.id === report.uploaded_by;
   };
 
   const filteredReports = reports.filter(report => {
+    const uploaderName = report.uploader?.name || 'Unknown';
     const matchesSearch = report.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                         report.description.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                         report.uploadedByName.toLowerCase().includes(searchTerm.toLowerCase());
+                         (report.description && report.description.toLowerCase().includes(searchTerm.toLowerCase())) ||
+                         uploaderName.toLowerCase().includes(searchTerm.toLowerCase());
     return matchesSearch && canViewReport(report);
   });
 
@@ -460,10 +395,10 @@ export function Reports() {
                             <p className="text-gray-600 mb-2">{report.description}</p>
                           )}
                           <div className="flex items-center space-x-4 text-sm text-gray-500">
-                            <span>Файл: {report.fileName}</span>
-                            <span>Размер: {formatFileSize(report.fileSize)}</span>
-                            <span>Автор: {report.uploadedByName}</span>
-                            <span>Дата: {report.uploadedAt.toLocaleDateString('ru-RU')}</span>
+                            <span>Файл: {report.file_name}</span>
+                            <span>Размер: {formatFileSize(report.file_size)}</span>
+                            <span>Автор: {report.uploader?.name || 'Unknown'}</span>
+                            <span>Дата: {new Date(report.uploaded_at).toLocaleDateString('ru-RU')}</span>
                           </div>
                         </div>
                         
@@ -501,7 +436,7 @@ export function Reports() {
                         </div>
                       </div>
                       
-                      {user?.role !== 'admin' && user?.id !== report.uploadedBy && (
+                      {user?.role !== 'admin' && user?.id !== report.uploaded_by && (
                         <div className="mt-3 bg-yellow-50 border border-yellow-200 rounded-lg p-3">
                           <p className="text-sm text-yellow-800">
                             <strong>Ограниченный доступ:</strong> Вы видите этот отчет, но не можете его просматривать или скачивать.
